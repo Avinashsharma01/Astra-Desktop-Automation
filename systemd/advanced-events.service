@@ -1,0 +1,14 @@
+[Unit]
+Description=Astra Advanced Desktop & Developer Event Voice Monitor
+After=graphical-session.target automation-astra.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do test -f "$XDG_RUNTIME_DIR/automation-astra.ready" && exit 0; sleep 1; done; exit 0'
+ExecStart=%h/Automation/piper-venv/bin/python %h/Automation/scripts/advanced-events.py
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

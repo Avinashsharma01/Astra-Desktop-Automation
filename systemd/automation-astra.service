@@ -1,0 +1,14 @@
+[Unit]
+Description=Astra Core Voice Automation & Startup Assistant
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/Automation/events.py --startup
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,236 @@
+
+#!/usr/bin/env python3
+
+import glob
+import hashlib
+import os
+import subprocess
+import time
+from pathlib import Path
+
+# ---------- Configuration ----------
+
+HOME = Path.home()
+BASE = HOME / "Automation"
+CACHE = BASE / "tts-cache"
+MODELS = BASE / "tts-models"
+
+PYTHON = BASE / "piper-venv/bin/python"
+PLAYER = "/usr/bin/mpv"
+VOICE = "en_US-amy-medium"
+
+POLL_SECONDS = 3
+
+MESSAGES = {
+    "charger_connected":
+        "Laptop charger connected. Let's get to work!",
+
+    "charger_disconnected":
+        "Charger disconnected. You are now on battery.",
+
+    "wifi_connected":
+        "Wi-Fi connected. You are ready to work.",
+
+    "wifi_disconnected":
+        "Wi-Fi disconnected. Please check your connection.",
+
+    "bluetooth_connected":
+        "Bluetooth device connected.",
+
+    "bluetooth_disconnected":
+        "Bluetooth device disconnected.",
+}
+
+
+# ---------- Offline text-to-speech ----------
+
+def speak(message):
+    """Generate speech once, cache it, and play it locally."""
+    if not message:
+        return
+
+    CACHE.mkdir(parents=True, exist_ok=True)
+
+    digest = hashlib.sha256(message.encode("utf-8")).hexdigest()
+    audio_file = CACHE / f"{digest}.wav"
+
+    if not audio_file.exists():
+        temp_file = CACHE / f".{digest}.tmp.wav"
+
+        command = [
+            str(PYTHON), "-m", "piper",
+            "-m", VOICE,
+            "--data-dir", str(MODELS),
+            "-f", str(temp_file),
+            "--", message,
+        ]
+
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+
+            if result.returncode != 0 or not temp_file.exists():
+                print(
+                    f"Speech generation failed: {result.stderr}",
+                    flush=True,
+                )
+                temp_file.unlink(missing_ok=True)
+                return
+
+            os.replace(temp_file, audio_file)
+
+        except (OSError, subprocess.TimeoutExpired) as error:
+            print(f"TTS error: {error}", flush=True)
+            temp_file.unlink(missing_ok=True)
+            return
+
+    try:
+        # Wait for playback to finish so announcements don't overlap.
+        subprocess.run(
+            [PLAYER, "--no-video", "--really-quiet", str(audio_file)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"Audio playback error: {error}", flush=True)
+
+
+# ---------- Charger detection ----------
+
+def charger_state():
+    for path in glob.glob("/sys/class/power_supply/*"):
+        try:
+            with open(f"{path}/type") as f:
+                power_type = f.read().strip()
+
+            if power_type in ("Mains", "USB", "USB_C"):
+                with open(f"{path}/online") as f:
+                    if f.read().strip() == "1":
+                        return True
+
+        except (OSError, ValueError):
+            continue
+
+    return False
+
+
+# ---------- Wi-Fi detection ----------
+
+def wifi_state():
+    try:
+        result = subprocess.run(
+            ["nmcli", "-t", "-f", "TYPE,STATE", "device", "status"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+
+        if result.returncode != 0:
+            return None
+
+        for line in result.stdout.splitlines():
+            fields = line.split(":", 1)
+
+            if len(fields) == 2 and fields[0] == "wifi":
+                return fields[1] == "connected"
+
+        return None
+
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+# ---------- Bluetooth detection ----------
+
+def bluetooth_devices():
+    try:
+        result = subprocess.run(
+            ["bluetoothctl", "devices", "Connected"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+
+        if result.returncode != 0:
+            return None
+
+        devices = {}
+
+        for line in result.stdout.splitlines():
+            parts = line.split(maxsplit=2)
+
+            if len(parts) == 3 and parts[0] == "Device":
+                devices[parts[1]] = parts[2]
+
+        return devices
+
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+# ---------- Event listener ----------
+
+def snapshot():
+    return {
+        "charger": charger_state(),
+        "wifi": wifi_state(),
+        "bluetooth": bluetooth_devices(),
+    }
+
+
+def main():
+    print("Offline voice automation started.", flush=True)
+
+    # Establish the initial state without announcing false events.
+    previous = snapshot()
+
+    while True:
+        time.sleep(POLL_SECONDS)
+        current = snapshot()
+
+        # Charger connect/disconnect
+        old = previous["charger"]
+        new = current["charger"]
+
+        if old is not None and new is not None and old != new:
+            key = "charger_connected" if new else "charger_disconnected"
+            speak(MESSAGES[key])
+
+        # Wi-Fi connect/disconnect
+        old = previous["wifi"]
+        new = current["wifi"]
+
+        if old is not None and new is not None and old != new:
+            key = "wifi_connected" if new else "wifi_disconnected"
+            speak(MESSAGES[key])
+
+        # Bluetooth device connect/disconnect
+        old_bt = previous["bluetooth"]
+        new_bt = current["bluetooth"]
+
+        if old_bt is not None and new_bt is not None:
+            for address in new_bt.keys() - old_bt.keys():
+                speak(f"{new_bt[address]} connected.")
+
+            for address in old_bt.keys() - new_bt.keys():
+                speak(f"{old_bt[address]} disconnected.")
+
+        # Retain last known state when a subsystem check fails.
+        for key in ("charger", "wifi", "bluetooth"):
+            if current[key] is None:
+                current[key] = previous[key]
+
+        previous = current
+
+
+if __name__ == "__main__":
+    main()
